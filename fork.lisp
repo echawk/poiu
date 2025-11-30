@@ -35,8 +35,9 @@
   ;; But this work-around makes it safe to call run-program before to invoke poiu
   ;; (it is of course safe after). The true fix to allow run-program to be invoked
   ;; at load-time would be to have an API for a process-waiting callbacks.
-  #+(and sbcl unix)
-  (sb-sys:default-interrupt sb-unix:sigchld)) ; ignore-interrupt is undefined for SIGCHLD.
+  ;;#+(and sbcl unix)
+  ;;(sb-sys:enable-interrupt sb-unix:sigchld #'ignore)
+  nil) ; ignore-interrupt is undefined for SIGCHLD.
 
 (defun ncpus ()
   (let ((ncpus (cond ((featurep :linux)
