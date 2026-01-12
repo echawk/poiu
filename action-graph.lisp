@@ -110,14 +110,24 @@
     (when (and parent (plan-action-index plan action))
       (record-action-dependency parent action (plan-parents plan) (plan-children plan)))))
 
-(defmethod (setf action-status) :before
-    (new-status (p parallel-plan) (o operation) (c component))
+(defmethod asdf/plan:action-status
+           ((plan parallel-plan) (o operation) (c component))
+           "Return the ASDF action status, delegating to the underlying plan machinery."
+           (call-next-method))
+
+(defmethod (setf asdf/plan:action-status)
+    (new-status (plan parallel-plan) (o operation) (c component))
+  "Track newly-seen actions without confusing ASDF's plan protocol."
   (let ((action (make-action o c)))
-    (unless (gethash action (visited-actions *asdf-session*)) ; already visited?
-      (setf (gethash action (plan-action-indices p)) (fill-pointer (plan-all-actions p)))
-      (vector-push-extend action (plan-all-actions p))
-      (when (empty-p (action-map (plan-children p) action))
-        (enqueue (plan-starting-points p) action)))))
+    (unless (gethash action (visited-actions *asdf-session*))
+      ;; index action
+      (setf (gethash action (plan-action-indices plan))
+            (fill-pointer (plan-all-actions plan)))
+      (vector-push-extend action (plan-all-actions plan))
+      ;; enqueue if dependency-free
+      (when (empty-p (action-map (plan-children plan) action))
+        (enqueue (plan-starting-points plan) action))))
+  (call-next-method))
 
 (defun summarize-plan (plan)
   (with-slots (starting-points children) plan
