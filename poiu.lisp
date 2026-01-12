@@ -18,7 +18,7 @@
 
 (defmethod perform-plan ((plan parallel-plan) &key verbose &allow-other-keys)
   (unless (can-fork-or-warn)
-    (return-from perform-plan (perform-plan (serialize-plan plan))))
+    (return-from perform-plan (call-next-method)))
   (with-slots (starting-points children parents) plan
     (let* ((all-deferred-warnings nil)
            (planned-output-action-count (planned-output-action-count *asdf-session*))
