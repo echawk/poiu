@@ -125,19 +125,19 @@
        ,(mapcar 'action-path (queue-contents starting-points)))
       (:dependencies
        ,(mapcar #'rest
-                  (sort
-                   (loop :for parent-node :being :the :hash-keys :in children
-                         :using (:hash-value progeny)
-                         :for parent = parent-node
-                         :for (o . c) = parent
-                         :collect `(,(plan-action-index plan parent)
-                                    ,(action-path parent)
-                                    ,(if (action-already-done-p plan o c) :- :+)
-                                    ,@(loop :for child-node :being :the :hash-keys :in progeny
-                                            :using (:hash-value v)
-                                            :for child = child-node
-                                            :when v :collect (action-path child))))
-                   #'< :key #'first))))))
+                (sort
+                 (loop :for parent-node :being :the :hash-keys :in children
+                       :using (:hash-value progeny)
+                       :for parent = parent-node
+                       :for (o . c) = parent
+                       :collect `(,(plan-action-index plan parent)
+                                  ,(action-path parent)
+                                  ,(if (action-already-done-p plan o c) :- :+)
+                                  ,@(loop :for child-node :being :the :hash-keys :in progeny
+                                          :using (:hash-value v)
+                                          :for child = child-node
+                                          :when v :collect (action-path child))))
+                 #'< :key #'first))))))
 
 (defgeneric serialize-plan (plan))
 (defmethod serialize-plan ((plan list)) plan)
