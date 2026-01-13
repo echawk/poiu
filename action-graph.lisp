@@ -149,13 +149,20 @@
                                           :when v :collect (action-path child))))
                  #'< :key #'first))))))
 
-(defgeneric serialize-plan (plan))
-(defmethod serialize-plan ((plan list)) plan)
+(defgeneric serialize-plan (plan)
+  (:documentation
+   "Return a POIU-executable sequential representation of PLAN."))
+
+(defmethod serialize-plan ((plan asdf/plan:sequential-plan))
+  plan)
+
 (defmethod serialize-plan ((plan parallel-plan))
-  (with-slots (all-actions) plan
-    (loop :for action :in (plan-actions plan)
-          :for (o . c) = action
-          :when (status-need-p (action-status plan o c)) :collect action)))
+  ;; FIXME: is it possible to convert a parallel plan into a sequential plan?
+  ;; return a list of remaining actions for POIU to execute
+  (loop for action in (plan-actions plan)
+        for (o . c) = action
+        when (status-need-p (asdf/plan:action-status plan o c))
+          collect action))
 
 (defgeneric check-invariants (object))
 

@@ -94,10 +94,7 @@
                         (action-description o c) backgroundp)
                   (finish-outputs)
                   (perform-with-restarts o c))
-                 (t
-                  (mark-operation-done o c)
-                  ;; nil
-                  ))
+                 (t nil))
                (when backgroundp
                  (decf planned-output-action-count)
                  (asdf-message "~&[~vd to go] Done ~A~%"
