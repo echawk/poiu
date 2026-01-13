@@ -16,7 +16,37 @@
      (make-pathname :name (format nil "~A.ASDF-~A" (file-namestring p) (type-of o))
                     :type "process-result" :defaults p))))
 
+;; (defun poiu-parallelizable-action-p (plan operation component)
+;;   "Return true iff it is safe to execute OPERATION on COMPONENT in parallel.
+
+;; This conservative predicate intentionally only allows file-level COMPILE-OPs.
+;; All other actions must remain sequential to preserve ASDF invariants."
+;;   (declare (ignore plan))
+;;   (and
+;;    ;; Only compile operations
+;;    (typep operation 'asdf:compile-op)
+
+;;    ;; Only source files (no systems, no modules)
+;;    (typep component 'asdf:cl-source-file)
+
+;;    ;; Never parallelize ASDF or UIOP themselves
+;;    (let ((system (asdf:component-system component)))
+;;      (not (member (asdf:component-name system)
+;;                   '("asdf" "uiop")
+;;                   :test #'string=)))))
+
 (defmethod perform-plan ((plan parallel-plan) &key verbose &allow-other-keys)
+
+  ;; (when (some (lambda (action)
+  ;;               (destructuring-bind (o . c) action
+  ;;                 (let ((system (asdf:component-system c)))
+  ;;                   (and system
+  ;;                        (member (asdf:component-name system)
+  ;;                                '("asdf" "uiop")
+  ;;                                :test #'string=)))))
+  ;;             (plan-actions plan))
+  ;;   (return-from perform-plan (call-next-method)))
+
   (unless (can-fork-or-warn)
     (return-from perform-plan (call-next-method)))
   (with-slots (starting-points children parents) plan
@@ -27,8 +57,11 @@
            (bg-queue (simple-queue)))
       (labels ((background-p (action)
                  (destructuring-bind (o . c) action
-                   (not (or (needed-in-image-p o c)
-                            (action-already-done-p plan o c)))))
+                   (and
+                    ;; Must be safe to parallelize, not be required in the image, & not already be done
+                    ;;(poiu-parallelizable-action-p plan o c)
+                    (not (needed-in-image-p o c))
+                    (not (action-already-done-p plan o c)))))
                (categorize-starting-points ()
                  (loop :for action :in (dequeue-all starting-points) :do
                    (enqueue (if (background-p action) bg-queue fg-queue) action))))
@@ -62,7 +95,9 @@
                   (finish-outputs)
                   (perform-with-restarts o c))
                  (t
-                  (mark-operation-done o c)))
+                  (mark-operation-done o c)
+                  ;; nil
+                  ))
                (when backgroundp
                  (decf planned-output-action-count)
                  (asdf-message "~&[~vd to go] Done ~A~%"
@@ -135,6 +170,19 @@ debug them later.")
   (recording-breadcrumbs (breadcrumbs-to record-breadcrumbs-p)
     (when read-breadcrumbs-p
       (perform-plan (read-breadcrumbs-from operation breadcrumb-input-pathname)))))
+
+(defmethod asdf/operate:operate :around
+    ((operation asdf:operation) (component asdf:component)
+     &rest args &key &allow-other-keys)
+  (let* ((system (asdf:component-system component))
+         (system-name (and system (asdf:component-name system)))
+         (*plan-class*
+           (if (and system-name
+                    (not (member system-name '("asdf" "uiop")
+                                 :test #'string=)))
+               'parallel-plan
+               *plan-class*)))
+    (apply #'call-next-method operation component args)))
 
 (setf *plan-class* 'parallel-plan)
 
