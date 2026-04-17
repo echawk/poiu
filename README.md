@@ -12,21 +12,19 @@ This dependency graph can also be extracted and used for other purposes.
 Version Compatibility
 ---------------------
 
-POIU 1.34.1 reportedly passed its test of building and using Exscribe
-with ASDF 3.3.4.1 on SBCL 2.0.3.62 on Linux x86-64.
-Still, support for ASDF 3.3 is considered incomplete, with many spurious warnings,
-as POIU is confused by ASDF's support for multiple phases of invocation in one session.
+This tree has been updated and locally tested with ASDF 3.3.7 on SBCL 2.6.3.
+The current regression coverage includes:
 
-See TODO section at the end.
-Please report issues you experience, and particularly so
-if you can isolate minimal circumstances that trigger those issues.
+- a synthetic concurrency check that verifies overlapping `compile-op`s,
+- `str`, which exercises recursive/nested ASDF operations,
+- `ironclad`, which exercises large multi-file systems and package ordering,
+- `osicat`, which exercises `cffi-grovel` and generated-file `process-op`s,
+- `alexandria`, which exercises many independent compile actions.
 
-For an older known-working combination, try POIU 1.31.1 and ASDF 3.1.7
--- which if your implementation comes with a more recent ASDF
-(as checked by `(require :asdf) (asdf:asdf-version)`) may require
-overriding your implementation's ASDF e.g. using the `tools/install-asdf.lisp`
-script from the ASDF source repository at
-< http://gitlab.common-lisp.net/asdf/asdf >.
+Modern SBCL on macOS remains more conservative by default: POIU now caps
+background workers to 2 there because higher raw-fork fan-out proved unstable in
+real-world loads. You can override that cap explicitly with `POIU_MAX_FORKS` or
+by rebinding `poiu/fork:*max-forks*`.
 
 
 Introduction
@@ -122,8 +120,8 @@ You can also explicitly pass a `:plan-class` parameter to `asdf:operate` & co,
 or you can call the parallel-operate functions defined by POIU.
 
 You can control how many processes POIU may fork at a time
-by binding `asdf::*max-forks*`.
-The default is the number of cpus on which the machine POIU was loaded,
+by binding `poiu/fork:*max-forks*`.
+The default is normally the number of cpus on which the machine POIU was loaded,
 which if resuming from a dumped image might not be the same as
 the machine on which it is now running, so you may want to reset that variable
 in e.g. uiop's image-restore hook.
@@ -131,6 +129,8 @@ You can recompute the number of processors on the current machine with:
 `(poiu/fork:ncpus)`.
 In case this function fails to find an answer, it returns NIL,
 in which case POIU defaults the `*max-forks*` to 16.
+On SBCL/macOS, POIU currently caps that default to 2 worker processes for stability.
+You may also set `POIU_MAX_FORKS` in the environment before loading POIU.
 
 
 Installation
@@ -183,6 +183,13 @@ including an explicit repo-local `XDG_CACHE_HOME`, use:
 It builds a synthetic ASDF system with four independent source files that each spend two
 seconds in `:compile-toplevel`, then verifies that POIU reached overlapping compilation
 (`peak_compile_concurrency > 1`) and multiple worker forks.
+
+For a real-world regression sweep against locally available libraries, use:
+```
+    sh tests/run-real-world-check.sh
+```
+By default this loads `ironclad`, `str`, `osicat`, and `alexandria` through POIU,
+still using an explicit repo-local `XDG_CACHE_HOME`.
 
 
 Determinism

@@ -12,6 +12,19 @@
 (defun maybe-reify-deferred-warnings ()
   (ignore-errors (reify-deferred-warnings)))
 
+(defun package-definition-component-p (component)
+  (and (typep component 'asdf:cl-source-file)
+       (let* ((component-name (string-downcase (or (component-name component) "")))
+              (pathname-name (string-downcase (or (pathname-name (component-pathname component)) ""))))
+         (or (member component-name '("package" "packages" "pkgdcl")
+                     :test #'string=)
+             (member pathname-name '("package" "packages" "pkgdcl")
+                     :test #'string=)))))
+
+(defun define-op-p (operation)
+  (let ((class (find-class (find-symbol "DEFINE-OP" "ASDF/FIND-SYSTEM") nil)))
+    (and class (typep operation class))))
+
 (defun action-output-stamp (operation component)
   (let* ((outputs (remove-if 'null (output-files operation component)))
          (stamps (mapcar #'get-file-stamp outputs)))
@@ -33,6 +46,18 @@
            :level (asdf/plan::status-level plan-status)
            :index (status-index plan-status))))
   (poiu/action-graph::parallel-plan-mark-as-done plan operation component))
+
+(defun collapse-stalled-done-actions (plan)
+  (let ((count 0))
+    (dolist (action (remove-duplicates
+                     (append (action-map-keys (plan-parents plan))
+                             (action-map-keys (plan-children plan)))
+                     :test #'equal))
+      (destructuring-bind (o . c) action
+        (when (action-already-done-p plan o c)
+          (incf count)
+          (poiu/action-graph::parallel-plan-mark-as-done plan o c))))
+    count))
 
 ;;; Performing a parallel plan
 (defun action-result-file (o c)
@@ -78,9 +103,11 @@
     (dequeue-all starting-points)
     (dolist (action (plan-actions plan))
       (destructuring-bind (o . c) action
-        (when (and (status-need-p (action-status plan o c))
-                   (empty-p (action-map children action)))
-          (enqueue starting-points action))))
+        (let ((status (action-status plan o c)))
+          (when (and status
+                     (status-need-p status)
+                     (empty-p (action-map children action)))
+            (enqueue starting-points action)))))
     (let* ((all-deferred-warnings nil)
            (planned-output-action-count (planned-output-action-count *asdf-session*))
            (ltogo (unless (zerop planned-output-action-count) (ceiling (log planned-output-action-count 10))))
@@ -91,63 +118,70 @@
                    (and
                     ;; Must be safe to parallelize, not be required in the image, & not already be done
                     ;;(poiu-parallelizable-action-p plan o c)
+                    (not (package-definition-component-p c))
                     (not (needed-in-image-p o c))
                     (not (action-already-done-p plan o c)))))
                (categorize-starting-points ()
                  (loop :for action :in (dequeue-all starting-points) :do
                    (enqueue (if (background-p action) bg-queue fg-queue) action))))
         (categorize-starting-points)
-        (doqueue/forking
-            (fg-queue bg-queue
-             :variables (:item action :backgroundp backgroundp :result result :condition condition)
-             :deterministic-order
-             (when (plan-deterministic-p plan)
-               #'(lambda (action)
-                   (plan-action-index plan action)))
-             :announce
-             (when verbose
+        (loop
+          (doqueue/forking
+              (fg-queue bg-queue
+               :variables (:item action :backgroundp backgroundp :result result :condition condition)
+               :deterministic-order
+               (when (plan-deterministic-p plan)
+                 #'(lambda (action)
+                     (plan-action-index plan action)))
+               :announce
+               (when verbose
+                 (destructuring-bind (o . c) action
+                   (format t "~&Will ~:[try~;skip~] ~A in ~:[foreground~;background~]~%"
+                           (action-already-done-p plan o c)
+                           (action-description o c) backgroundp)))
+               :result-file
+               (destructuring-bind (o . c) action (action-result-file o c))
+               ;; How we cleanup in the foreground after an action is run
+               :cleanup
                (destructuring-bind (o . c) action
-                 (format t "~&Will ~:[try~;skip~] ~A in ~:[foreground~;background~]~%"
-                         (action-already-done-p plan o c)
-                         (action-description o c) backgroundp)))
-             :result-file
-             (destructuring-bind (o . c) action (action-result-file o c))
-             ;; How we cleanup in the foreground after an action is run
-             :cleanup
-             (destructuring-bind (o . c) action
-               (destructuring-bind (&key deferred-warnings &allow-other-keys) result
-                 (when deferred-warnings
-                   (push deferred-warnings all-deferred-warnings)))
-               (cond
-                 (condition
-                  (finish-outputs)
-                  (warn "Failed ~A~:[~; in the background~]. Retrying~:*~:[~; in the foreground~]."
-                        (action-description o c) backgroundp)
-                  (finish-outputs)
-                  (perform-with-restarts o c))
-                 (t nil))
-               (when backgroundp
-                 (decf planned-output-action-count)
-                 (asdf-message "~&[~vd to go] Done ~A~%"
-                               ltogo planned-output-action-count (action-description o c))
-               (finish-outputs))
-               (if (and backgroundp (null condition))
-                   (mark-background-action-as-done plan o c)
-                   (mark-as-done plan o c))
-               (categorize-starting-points)))
-          ;; What we do in each forked process
-          (destructuring-bind (o . c) action
-            (cond
-              (backgroundp
-               (perform-with-restarts o c)
-               (let ((deferred-warnings (maybe-reify-deferred-warnings)))
-                 (when deferred-warnings
-                   `(:deferred-warnings ,deferred-warnings))))
-              ((action-already-done-p plan o c)
-               nil)
-              (t
-               (perform-with-restarts o c)
-               nil))))
+                 (destructuring-bind (&key deferred-warnings &allow-other-keys) result
+                   (when deferred-warnings
+                     (push deferred-warnings all-deferred-warnings)))
+                 (cond
+                   (condition
+                    (finish-outputs)
+                    (warn "Failed ~A~:[~; in the background~]. Retrying~:*~:[~; in the foreground~]."
+                          (action-description o c) backgroundp)
+                    (finish-outputs)
+                    (perform-with-restarts o c))
+                   (t nil))
+                 (when backgroundp
+                   (decf planned-output-action-count)
+                   (asdf-message "~&[~vd to go] Done ~A~%"
+                                 ltogo planned-output-action-count (action-description o c))
+                 (finish-outputs))
+                 (if (and backgroundp (null condition))
+                     (mark-background-action-as-done plan o c)
+                     (mark-as-done plan o c))
+                 (categorize-starting-points)))
+            ;; What we do in each forked process
+            (destructuring-bind (o . c) action
+              (cond
+                (backgroundp
+                 (perform-with-restarts o c)
+                 (let ((deferred-warnings (maybe-reify-deferred-warnings)))
+                   (when deferred-warnings
+                     `(:deferred-warnings ,deferred-warnings))))
+                ((action-already-done-p plan o c)
+                 nil)
+                (t
+                 (perform-with-restarts o c)
+                 nil))))
+          (unless (and (empty-p fg-queue) (empty-p bg-queue) (not (empty-p children)))
+            (return))
+          (when (zerop (collapse-stalled-done-actions plan))
+            (return))
+          (categorize-starting-points))
         (map () #'unreify-deferred-warnings all-deferred-warnings)
         (assert (and (empty-p fg-queue) (empty-p bg-queue) (empty-p children))
                 (parents children)
@@ -205,12 +239,15 @@ debug them later.")
      &rest args &key &allow-other-keys)
   (let* ((system (asdf:component-system component))
          (system-name (and system (asdf:component-name system)))
+         (recursivep (consp (visiting-action-list *asdf-session*)))
          (*plan-class*
-           (if (and system-name
+           (if (and (not recursivep)
+                    (not (define-op-p operation))
+                    system-name
                     (not (member system-name '("asdf" "uiop")
                                  :test #'string=)))
                'parallel-plan
-               *plan-class*)))
+               'sequential-plan)))
     (apply #'call-next-method operation component args)))
 
 (setf *plan-class* 'parallel-plan)

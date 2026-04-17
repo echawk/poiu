@@ -50,7 +50,21 @@
                    (getenv "NUMBER_OF_PROCESSORS"))))))
      (and ncpus (ignore-errors (parse-integer ncpus :junk-allowed t)))))
 
-(defparameter *max-forks* (or (ncpus) 16)) ; limit how parallel we will try to be.
+(defun getenv-integer (name)
+  (let ((value (getenv name)))
+    (and value
+         (ignore-errors (parse-integer value :junk-allowed t)))))
+
+(defun default-max-forks ()
+  (or (getenv-integer "POIU_MAX_FORKS")
+      #+sbcl
+      (and (featurep :darwin)
+           ;; Raw forked compilation on modern SBCL/macOS becomes unstable at
+           ;; higher fan-out; keep a small amount of parallelism by default.
+           (max 1 (min 2 (or (ncpus) 2))))
+      (or (ncpus) 16)))
+
+(defparameter *max-forks* (default-max-forks)) ; limit how parallel we will try to be.
 (defparameter *max-actual-forks* 0) ; record how parallel we actually went.
 
 #+(and sbcl os-unix)
