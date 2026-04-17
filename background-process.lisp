@@ -76,7 +76,9 @@
        (reset-deferred-warnings)
        (unwind-protect
             (multiple-value-bind (result condition)
-                (ignore-errors (values (funcall function data t)))
+                (ignore-errors
+                  (with-compilation-unit ()
+                    (values (funcall function data t))))
               (process-return result-file result condition))
          (finish-outputs)
          (quit 0 t)))
@@ -178,4 +180,3 @@
       :announce #'(lambda (,item ,backgroundp) (declare (ignorable ,item ,backgroundp)) ,announce)
       :cleanup #'(lambda (,item ,result ,condition ,backgroundp)
                    (declare (ignorable ,item ,result ,condition ,backgroundp)) ,cleanup))))
-

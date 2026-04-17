@@ -9,6 +9,31 @@
 
 (in-package :poiu)
 
+(defun maybe-reify-deferred-warnings ()
+  (ignore-errors (reify-deferred-warnings)))
+
+(defun action-output-stamp (operation component)
+  (let* ((outputs (remove-if 'null (output-files operation component)))
+         (stamps (mapcar #'get-file-stamp outputs)))
+    (and outputs
+         (notany #'null stamps)
+         (timestamps-earliest stamps))))
+
+(defun mark-background-action-as-done (plan operation component)
+  (let* ((plan-status (action-status plan operation component))
+         (stamp (action-output-stamp operation component)))
+    (assert stamp ()
+            "Background action ~A completed but produced no observable output stamp"
+            (action-description operation component))
+    (setf (component-operation-time operation component) stamp
+          (action-status plan operation component)
+          (asdf/plan::make-action-status
+           :bits (logior (asdf/plan::status-bits plan-status) asdf/plan::+done-bit+)
+           :stamp stamp
+           :level (asdf/plan::status-level plan-status)
+           :index (status-index plan-status))))
+  (poiu/action-graph::parallel-plan-mark-as-done plan operation component))
+
 ;;; Performing a parallel plan
 (defun action-result-file (o c)
   (let ((p (component-pathname c)))
@@ -50,6 +75,12 @@
   (unless (can-fork-or-warn)
     (return-from perform-plan (call-next-method)))
   (with-slots (starting-points children parents) plan
+    (dequeue-all starting-points)
+    (dolist (action (plan-actions plan))
+      (destructuring-bind (o . c) action
+        (when (and (status-need-p (action-status plan o c))
+                   (empty-p (action-map children action)))
+          (enqueue starting-points action))))
     (let* ((all-deferred-warnings nil)
            (planned-output-action-count (planned-output-action-count *asdf-session*))
            (ltogo (unless (zerop planned-output-action-count) (ceiling (log planned-output-action-count 10))))
@@ -99,19 +130,20 @@
                  (decf planned-output-action-count)
                  (asdf-message "~&[~vd to go] Done ~A~%"
                                ltogo planned-output-action-count (action-description o c))
-                 (finish-outputs))
-               (mark-as-done plan o c)
+               (finish-outputs))
+               (if (and backgroundp (null condition))
+                   (mark-background-action-as-done plan o c)
+                   (mark-as-done plan o c))
                (categorize-starting-points)))
           ;; What we do in each forked process
           (destructuring-bind (o . c) action
             (cond
               (backgroundp
                (perform-with-restarts o c)
-               `(:deferred-warnings ,(reify-deferred-warnings)))
+               (let ((deferred-warnings (maybe-reify-deferred-warnings)))
+                 (when deferred-warnings
+                   `(:deferred-warnings ,deferred-warnings))))
               ((action-already-done-p plan o c)
-               (unless (or (not (needed-in-image-p o c))
-                           (action-already-done-p nil o c))
-                 (warn "WTF? aedp ~A" (action-description o c)))
                nil)
               (t
                (perform-with-restarts o c)
@@ -182,4 +214,3 @@ debug them later.")
     (apply #'call-next-method operation component args)))
 
 (setf *plan-class* 'parallel-plan)
-

@@ -175,6 +175,15 @@ To run the test, use:
     sh test.lisp
 ```
 
+For a local SBCL-only reproducibility check against the current code in this repository,
+including an explicit repo-local `XDG_CACHE_HOME`, use:
+```
+    sh tests/run-concurrency-check.sh
+```
+It builds a synthetic ASDF system with four independent source files that each spend two
+seconds in `:compile-toplevel`, then verifies that POIU reached overlapping compilation
+(`peak_compile_concurrency > 1`) and multiple worker forks.
+
 
 Determinism
 -----------

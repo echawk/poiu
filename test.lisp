@@ -50,6 +50,12 @@
 (format *error-output* "~&ASDF ~A  POIU ~A~%" (asdf-version) (component-version (find-system "poiu")))
 (assert (poiu/fork:can-fork-p))
 
+(defparameter *breadcrumbs-file*
+  (uiop:merge-pathnames*
+   #p"breadcrumbs.text"
+   (make-pathname :name nil :type nil
+                  :defaults (or *load-truename* *compile-file-truename* *default-pathname-defaults*))))
+
 (setf *load-verbose* t
       *load-print* t
       *compile-verbose* t
@@ -84,7 +90,7 @@
                             (return))))
     (load-system
      :exscribe ;; :verbose t
-     :plan-class 'poiu:parallel-plan :breadcrumbs-to "/tmp/breadcrumbs.text"
+     :plan-class 'poiu:parallel-plan :breadcrumbs-to *breadcrumbs-file*
      :force :all)
     (funcall (uiop:find-symbol* :process-command-line :exscribe)
              `("-I" ,(namestring cl-user::*bastiat*)

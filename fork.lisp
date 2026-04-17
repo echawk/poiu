@@ -40,12 +40,14 @@
   nil) ; ignore-interrupt is undefined for SIGCHLD.
 
 (defun ncpus ()
-  (let ((ncpus (cond ((featurep :linux)
-                      (run-program '("grep" "-c" "^processor.:" "/proc/cpuinfo") :output :string))
-                     ((featurep :bsd) ;; reported to work on :darwin :freebsd :netbsd :openbsd.
-                      (run-program '("sysctl" "-n" "hw.ncpu") :output :string))
-                     ((os-windows-p)
-                      (getenv "NUMBER_OF_PROCESSORS")))))
+  (let ((ncpus
+          (ignore-errors
+            (cond ((featurep :linux)
+                   (run-program '("grep" "-c" "^processor.:" "/proc/cpuinfo") :output :string))
+                  ((featurep :bsd) ;; reported to work on :darwin :freebsd :netbsd :openbsd.
+                   (run-program '("sysctl" "-n" "hw.ncpu") :output :string))
+                  ((os-windows-p)
+                   (getenv "NUMBER_OF_PROCESSORS"))))))
      (and ncpus (ignore-errors (parse-integer ncpus :junk-allowed t)))))
 
 (defparameter *max-forks* (or (ncpus) 16)) ; limit how parallel we will try to be.
@@ -217,4 +219,3 @@ and the status of said process, to pass to posix-wexitstatus."
             (sb-sys:make-fd-stream write-fd :output t)))
   #-(and os-unix (or allegro clisp clozure sbcl))
   (not-implemented-error 'posix-pipe))
-

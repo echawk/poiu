@@ -37,6 +37,12 @@
 (defmethod plan-action-index ((plan parallel-plan) action)
   (gethash action (plan-action-indices plan)))
 
+(defun ensure-plan-action-index (plan action)
+  (or (plan-action-index plan action)
+      (setf (gethash action (plan-action-indices plan))
+            (prog1 (fill-pointer (plan-all-actions plan))
+              (vector-push-extend action (plan-all-actions plan))))))
+
 #| ;; We can't do that if we want to trace action-already-done-p
 (defmethod print-object ((plan parallel-plan) stream)
   (print-unreadable-object (plan stream :type t :identity t)
@@ -66,7 +72,7 @@
     (setf (action-map (action-map children parent) child) t)
     (setf (action-map (action-map parents child) parent) t)))
 
-(defun parallel-plan-mark-as-done (plan operation component)
+(defun parallel-plan-mark-as-done (plan operation component &key (enqueue-enabled-p t))
   ;; marks the action of operation on component as done in the deps hash-tables,
   ;; returns a list of new actions that are enabled by it being done.
   (with-slots (starting-points parents children) plan
@@ -93,11 +99,12 @@
                     :when (empty-p spouses)
                       :do (action-unmap parents child)
                       :and :collect child)))
-        (loop :for enabled-action :in enabled-parents
-            :for (e-o . e-c) = enabled-action
-            :do (if (and (needed-in-image-p e-o e-c) (not (action-already-done-p plan e-o e-c)))
-                    (enqueue starting-points enabled-action)
-                    (enqueue-in-front starting-points enabled-action)))
+        (when enqueue-enabled-p
+          (loop :for enabled-action :in enabled-parents
+                :for (e-o . e-c) = enabled-action
+                :do (if (and (needed-in-image-p e-o e-c) (not (action-already-done-p plan e-o e-c)))
+                        (enqueue starting-points enabled-action)
+                        (enqueue-in-front starting-points enabled-action))))
         (values enabled-parents forlorn-children)))))
 
 (defmethod mark-as-done :after ((plan parallel-plan) (operation operation) (component component))
@@ -106,8 +113,11 @@
 (defmethod record-dependency ((plan parallel-plan) (o operation) (c component))
   (let ((action (make-action o c))
         (parent (first (visiting-action-list *asdf-session*))))
-    ;; Only record the dependency if it points to a parent in the current plan.
-    (when (and parent (plan-action-index plan action))
+    (ensure-plan-action-index plan action)
+    ;; ASDF records dependencies before it finalizes an action's status,
+    ;; so we must index actions eagerly rather than waiting for (setf action-status).
+    (when parent
+      (ensure-plan-action-index plan parent)
       (record-action-dependency parent action (plan-parents plan) (plan-children plan)))))
 
 (defmethod asdf/plan:action-status
@@ -118,15 +128,7 @@
 (defmethod (setf asdf/plan:action-status)
     (new-status (plan parallel-plan) (o operation) (c component))
   "Track newly-seen actions without confusing ASDF's plan protocol."
-  (let ((action (make-action o c)))
-    (unless (gethash action (visited-actions *asdf-session*))
-      ;; index action
-      (setf (gethash action (plan-action-indices plan))
-            (fill-pointer (plan-all-actions plan)))
-      (vector-push-extend action (plan-all-actions plan))
-      ;; enqueue if dependency-free
-      (when (empty-p (action-map (plan-children plan) action))
-        (enqueue (plan-starting-points plan) action))))
+  (ensure-plan-action-index plan (make-action o c))
   (call-next-method))
 
 (defun summarize-plan (plan)
@@ -178,14 +180,5 @@
         (error "Cycle detected in the dependency graph:~%~S"
                (summarize-plan plan))))))
 
-(defmethod make-plan :around (plan-class (o operation) (c component) &key &allow-other-keys)
-  (let ((plan (call-next-method)))
-    (when (typep plan 'parallel-plan)
-      (warn "~S" (summarize-plan plan))
-      ;; make a second plan and destructively check it
-      (check-invariants (call-next-method)))
-    plan))
-
 (defmethod plan-actions ((plan parallel-plan))
   (coerce (plan-all-actions plan) 'list))
-

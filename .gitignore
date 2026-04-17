@@ -1,2 +1,2 @@
-*.*f*sl
-foo
+.cache/
+tests/concurrency-events.log
