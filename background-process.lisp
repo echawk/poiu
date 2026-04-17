@@ -27,8 +27,19 @@
    (result-file :initarg :result-file :accessor process-result-file)))
 
 (define-condition process-failed (error)
-  ((exit-status :initarg :exit-status)
-   (condition :initform nil :initarg :condition)))
+  ((exit-status :initarg :exit-status :reader process-failed-exit-status)
+   (condition-type :initform nil :initarg :condition-type :reader process-failed-condition-type)
+   (condition :initform nil :initarg :condition :reader process-failed-condition-message))
+  (:report
+   (lambda (condition stream)
+     (cond
+       ((process-failed-exit-status condition)
+        (format stream "Background process exited with status ~A"
+                (process-failed-exit-status condition)))
+       ((process-failed-condition-message condition)
+        (princ (process-failed-condition-message condition) stream))
+       (t
+        (princ "Background process failed" stream))))))
 
 (defun process-return (result-file result condition)
   (with-open-file (s result-file
@@ -37,7 +48,9 @@
       (write (reify-simple-sexp
               `(:process-done
                 ,@(when result `(:result ,result))
-                ,@(when condition `(:condition ,(princ-to-string condition)))))
+                ,@(when condition
+                    `(:condition-type ,(princ-to-string (class-name (class-of condition)))
+                      :condition ,(princ-to-string condition)))))
              :stream s))))
 
 (defun process-result (process status)
@@ -56,8 +69,13 @@
         (return (values nil (make-condition 'process-failed :condition "Could not read result file"))))
       (unless (and (consp form) (eq (car form) :process-done))
         (return (values nil (make-condition 'process-failed :condition "Invalid result file"))))
-      (destructuring-bind (&key result condition) (cdr form)
-        (return (values result (when condition (make-condition 'process-failed :condition condition))))))))
+      (destructuring-bind (&key result condition condition-type) (cdr form)
+        (return
+          (values result
+                  (when condition
+                    (make-condition 'process-failed
+                                    :condition condition
+                                    :condition-type condition-type))))))))
 
 (defun make-background-process (data function cleanup result-file)
   (disable-other-waiters)
@@ -94,42 +112,53 @@
   ;; assumes a single-threaded parent process
   (declare (optimize debug))
   (let ((processes (make-hash-table :test 'equal)))
-    (labels
-        ((fg-perform (action)
-           (funcall announce action nil)
-           (multiple-value-bind (result condition)
-               (ignore-errors (values (funcall fun action nil)))
-             (funcall cleanup action result condition nil)))
-         (cleanup-one (process status)
-           (multiple-value-bind (result condition)
-               (process-result process status)
-             (funcall (process-cleanup process)
-                      (process-data process) result condition t)))
-         (reap (&key wait)
-           (disable-other-waiters)
-           (multiple-value-bind (pid status)
-               (timed-do (*time-spent-waiting*) (posix-waitpid -1 :nohang (not wait)))
-             (etypecase pid
-               ((eql 0) ;; no process ended and nohang? Just return NIL.
-                nil)
-               ((integer 1 *) ;; some process ended? reap it!
-                (let ((process (gethash pid processes)))
-                  (assert process () "couln't find the pid ~A in processes ~S" pid (table-values processes))
-                  (remhash pid processes)
-                  (cleanup-one process status))
-                t)
-               ((eql -1) ;; error?
-                (assert (eql status +echild+) (status))
-                ;; we were waiting for some process(es),
-                ;; but the OS says everything was already reaped?
-                ;; Our implementation or some library may have disabled the SIGCHLD signal
-                ;; or preempted our wait. Mark all processes as completed.
-                (let ((missed (table-values processes)))
-                  (warn "No child left: we must have dropped a signal!")
-                  (clrhash processes)
-                  (dolist (process missed)
-                    (cleanup-one process nil)))
-                t)))))
+    (labels ((fg-perform (action)
+               (funcall announce action nil)
+               (multiple-value-bind (result condition)
+                   (ignore-errors (values (funcall fun action nil)))
+                 (funcall cleanup action result condition nil)))
+             (cleanup-one (process status)
+               (multiple-value-bind (result condition)
+                   (process-result process status)
+                 (funcall (process-cleanup process)
+                          (process-data process) result condition t)))
+             (reap (&key wait)
+               (disable-other-waiters)
+               (multiple-value-bind (pid status)
+                   (timed-do (*time-spent-waiting*)
+                     (posix-waitpid -1 :nohang (not wait)))
+                 (etypecase pid
+                   ((eql 0)
+                    nil)
+                   ((integer 1 *)
+                    (let ((process (gethash pid processes)))
+                      (assert process ()
+                              "couln't find the pid ~A in processes ~S"
+                              pid (table-values processes))
+                      (remhash pid processes)
+                      (cleanup-one process status))
+                    t)
+                   ((eql -1)
+                    (assert (eql status +echild+) (status))
+                    ;; Our implementation or some library may have disabled SIGCHLD
+                    ;; or preempted our wait. Mark all children as completed.
+                    (let ((missed (table-values processes)))
+                      (warn "No child left: we must have dropped a signal!")
+                      (clrhash processes)
+                      (dolist (process missed)
+                        (cleanup-one process nil)))
+                    t))))
+             (run-foreground-action ()
+               (if deterministic-order
+                   ;; Run a single action at a time so newly-enabled in-image work can
+                   ;; update the phase boundary before we commit to later compiles.
+                   (let* ((ordered-actions
+                            (sort (dequeue-all fg-queue) #'< :key deterministic-order))
+                          (next-action (first ordered-actions)))
+                     (dolist (deferred-action (rest ordered-actions))
+                       (enqueue fg-queue deferred-action))
+                     (fg-perform next-action))
+                   (fg-perform (dequeue fg-queue)))))
       (loop
         (let* ((no-fg-item? (empty-p fg-queue))
                (fg-item? (not no-fg-item?))
@@ -137,35 +166,37 @@
                (bg-item? (not no-bg-item?))
                (no-processes? (empty-p processes))
                (processes? (not no-processes?))
-               (no-bg-workers? (>= (size processes) *max-forks*))
-               (bg-workers? (not no-bg-workers?))
-               (work-to-fork? (and bg-item? bg-workers?)))
+               (worker-slot-open-p (< (size processes) *max-forks*))
+               (can-fork-background-action-p (and bg-item? worker-slot-open-p))
+               (can-run-foreground-action-p
+                 (and fg-item?
+                      (or (not deterministic-order)
+                          no-bg-item?)))
+               (must-wait-for-process-p
+                 (and processes?
+                      (not can-fork-background-action-p)
+                      (not can-run-foreground-action-p))))
           (cond
-            (;; Opportunistically reap any completed background process with no wait;
-             ;; wait and reap if nothing else to do.
-             (and processes?
-                  (reap :wait (and (not work-to-fork?)
-                                   (or no-fg-item? deterministic-order)))))
-            (;; Can run stuff in the background? Keep those CPUs busy!
-             work-to-fork?
+            ((and processes?
+                  (reap :wait must-wait-for-process-p)))
+            (can-fork-background-action-p
              (let ((item (dequeue bg-queue)))
                (funcall announce item t)
-               (let ((process (make-background-process item fun cleanup (funcall result-file item))))
+               (let ((process
+                       (make-background-process item fun cleanup (funcall result-file item))))
                  (setf (gethash (process-pid process) processes) process)
                  (when (< *max-actual-forks* (size processes))
                    (setf *max-actual-forks* (size processes))))))
-            (;; foreground actions in non-deterministic mode? Opportunistically run one
-             (and fg-item? (not deterministic-order))
-             (fg-perform (dequeue fg-queue)))
-            (;; foreground actions in deterministic mode after exhausting background actions?
-             ;; run them all in traversal order
-             (and fg-item? deterministic-order no-processes? no-bg-item?)
-             (map () #'fg-perform (sort (dequeue-all fg-queue) #'< :key deterministic-order)))
-            (;; Nothing to do or wait for anymore? done!
-             (and no-fg-item? no-bg-item? no-processes?)
+            (can-run-foreground-action-p
+             (run-foreground-action))
+            ((and no-fg-item? no-bg-item? no-processes?)
              (return))
             (t
-             (assert nil (bg-queue fg-queue processes)))))))))
+             (assert nil
+                     (fg-item? bg-item? processes? worker-slot-open-p
+                      can-fork-background-action-p can-run-foreground-action-p
+                      must-wait-for-process-p)
+                     "Unreachable scheduler state"))))))))
 
 (defmacro doqueue/forking ((fg-queue bg-queue
                             &key variables deterministic-order

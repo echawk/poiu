@@ -19,7 +19,8 @@ The current regression coverage includes:
 - `str`, which exercises recursive/nested ASDF operations,
 - `ironclad`, which exercises large multi-file systems and package ordering,
 - `osicat`, which exercises `cffi-grovel` and generated-file `process-op`s,
-- `alexandria`, which exercises many independent compile actions.
+- `alexandria`, which exercises many independent compile actions,
+- `split-sequence`, which exercises compile-time `in-package` ordering.
 
 Modern SBCL on macOS remains more conservative by default: POIU now caps
 background workers to 2 there because higher raw-fork fan-out proved unstable in
@@ -188,8 +189,8 @@ For a real-world regression sweep against locally available libraries, use:
 ```
     sh tests/run-real-world-check.sh
 ```
-By default this loads `ironclad`, `str`, `osicat`, and `alexandria` through POIU,
-still using an explicit repo-local `XDG_CACHE_HOME`.
+By default this loads `ironclad`, `str`, `osicat`, `alexandria`, and
+`split-sequence` through POIU, still using an explicit repo-local `XDG_CACHE_HOME`.
 
 
 Determinism

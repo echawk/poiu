@@ -104,8 +104,9 @@
 return the child PID in the parent, -1 in the child"
   #+(and os-unix (or allegro clisp clozure sbcl))
   (unless (can-fork-p)
-    (error #.(strcat "Cannot fork: more than one active thread."
-                     #+clozure " Are you using single-threaded-ccl?")))
+    (error #.(concatenate 'string
+                          "Cannot fork: more than one active thread."
+                          #+clozure " Are you using single-threaded-ccl?")))
   #+(and allegro os-unix)
   (excl.osi:fork)
   #+(and clisp os-unix)

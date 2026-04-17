@@ -8,7 +8,7 @@ export XDG_CACHE_HOME="$REPO_ROOT/.cache"
 mkdir -p "$XDG_CACHE_HOME"
 
 if [ "$#" -eq 0 ]; then
-  set -- ironclad str osicat alexandria
+  set -- ironclad str osicat alexandria split-sequence
 fi
 
 status=0
