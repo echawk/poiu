@@ -1,6 +1,8 @@
 (in-package #:cl-user)
 
 (require :asdf)
+#+sbcl
+(require :sb-posix)
 
 (defparameter *tests-root*
   (make-pathname :name nil :type nil
@@ -9,9 +11,33 @@
 (defparameter *repo-root*
   (uiop:merge-pathnames* #p"../" *tests-root*))
 
+(defun requested-plan-mode ()
+  (let ((value (or (uiop:getenv "POIU_PLAN_MODE") "parallel")))
+    (cond
+      ((string-equal value "parallel") :parallel)
+      ((string-equal value "sequential") :sequential)
+      (t
+       (error "POIU_PLAN_MODE must be one of PARALLEL or SEQUENTIAL, got ~S" value)))))
+
+(defun plan-mode-name (mode)
+  (ecase mode
+    (:parallel "parallel")
+    (:sequential "sequential")))
+
+(defun parallel-mode-p (mode)
+  (eq mode :parallel))
+
+(defun current-process-id ()
+  #+sbcl
+  (sb-posix:getpid)
+  #-sbcl
+  nil)
+
 (defun ensure-local-cache ()
-  (unless (uiop:getenv "XDG_CACHE_HOME")
-    (error "XDG_CACHE_HOME must be set by the shell wrapper")))
+  (let ((cache-root (uiop:getenv "XDG_CACHE_HOME")))
+    (unless cache-root
+      (error "XDG_CACHE_HOME must be set by the shell wrapper"))
+    (ensure-directories-exist (uiop:ensure-directory-pathname cache-root))))
 
 (defun maybe-set-max-forks ()
   (let ((value (uiop:getenv "POIU_MAX_FORKS")))
@@ -56,18 +82,47 @@
     (when source-file
       (ensure-output-directory-for-source source-file))))
 
+(defun maybe-load-poiu (mode)
+  (when (parallel-mode-p mode)
+    (asdf:load-system :poiu)
+    (maybe-set-max-forks)))
+
+(defun report-elapsed-time (start root-process-id)
+  (when (or (null root-process-id)
+            (= root-process-id (current-process-id)))
+    (let ((elapsed (/ (- (get-internal-real-time) start)
+                      internal-time-units-per-second)))
+      (format t "elapsed=~,2F seconds~%" elapsed)
+      (finish-output))))
+
+(defun load-system-with-timing (name mode)
+  (let* ((system (ensure-system-available name))
+         (start (get-internal-real-time))
+         (root-process-id (current-process-id)))
+    (format t "mode=~A~%" (plan-mode-name mode))
+    (format t "loading-system=~A~%" name)
+    (finish-output)
+    (ensure-system-output-directory system)
+    (unwind-protect
+         (handler-case
+             (progn
+               (asdf:load-system name :force t :verbose nil)
+               (format t "PASS ~A~%" name)
+               (finish-output))
+           (error (condition)
+             (format t "FAIL ~A~%" name)
+             (finish-output)
+             (error condition)))
+      (report-elapsed-time start root-process-id))))
+
 (defun main ()
   (ensure-local-cache)
   (pushnew *repo-root* asdf:*central-registry* :test #'equal)
   (maybe-load-quicklisp)
   (maybe-load-ocicl)
-  (asdf:load-system :poiu)
-  (maybe-set-max-forks)
-  (let* ((name (canonical-system-name (requested-system-name)))
-         (system (ensure-system-available name)))
-    (ensure-system-output-directory system)
-    (format t "loading-system=~A~%" name)
-    (asdf:load-system name :force t :verbose nil)
-    (format t "PASS ~A~%" name)))
+  (let* ((mode (requested-plan-mode))
+         (name (canonical-system-name (requested-system-name))))
+    (maybe-load-poiu mode)
+    (load-system-with-timing name mode)))
 
 (main)

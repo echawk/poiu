@@ -77,10 +77,25 @@
       (form-named-p form "DEFGENERIC")
       (form-named-p form "DEFMETHOD")))
 
+(defun source-file-uses-reader-eval-p (pathname)
+  "Return true when PATHNAME contains read-time evaluation syntax.
+
+This is a conservative text scan: false positives are acceptable because they
+only keep a file in the foreground, while false negatives can let worker
+processes compile a file without the compile-time state established in the
+parent image."
+  (with-open-file (stream pathname :direction :input)
+    (loop :for line = (read-line stream nil nil)
+          :while line
+          :thereis (search "#." line))))
+
 (defun compute-source-phase-info (pathname)
   (let ((in-package-name nil)
         (defines-package-p nil)
-        (foreground-compile-p nil)
+        (foreground-compile-p
+          (and pathname
+               (ignore-errors
+                 (source-file-uses-reader-eval-p pathname))))
         (required-packages '()))
     (labels ((record-required-packages (packages)
                (dolist (package packages)
