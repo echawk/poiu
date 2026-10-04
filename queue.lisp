@@ -4,7 +4,9 @@
   (:export
    #:empty-p #:size #:table-keys #:table-values
    #:enqueue #:enqueue-in-front #:dequeue #:queue-contents #:dequeue-all
-   #:simple-queue #:with-queue))
+   #:simple-queue #:with-queue
+   #:priority-queue #:make-priority-queue #:priority-queue-push #:priority-queue-pop
+   #:priority-queue-peek))
 (in-package :poiu/queue)
 
 (with-upgradability ()
@@ -119,5 +121,68 @@ as determined by TEST or TEST-NOT."))
 (defgeneric enqueue-many (queue list))
 (defmethod enqueue-many ((q simple-queue) list)
   (dolist (x list) (enqueue q x)) (values))
+
+;; A binary min-heap, ordered by a KEY function returning a real.
+;; Used by the scheduler to always pick the earliest ready action in plan order.
+(defclass priority-queue ()
+  ((heap :initform (make-array 16 :adjustable t :fill-pointer 0) :reader priority-queue-heap)
+   (key :initarg :key :reader priority-queue-key))
+  (:documentation "Min-heap of items ordered by the real number returned by KEY."))
+
+(defun make-priority-queue (&key (key #'identity))
+  (make-instance 'priority-queue :key key))
+
+(defmethod empty-p ((q priority-queue))
+  (zerop (fill-pointer (priority-queue-heap q))))
+(defmethod size ((q priority-queue))
+  (fill-pointer (priority-queue-heap q)))
+
+(defun priority-queue-push (q item)
+  (let* ((heap (priority-queue-heap q))
+         (key (priority-queue-key q))
+         (k (funcall key item))
+         (i (vector-push-extend item heap)))
+    (loop :while (plusp i)
+          :do (let ((parent (floor (1- i) 2)))
+                (if (< k (funcall key (aref heap parent)))
+                    (setf (aref heap i) (aref heap parent)
+                          i parent)
+                    (return))))
+    (setf (aref heap i) item)
+    item))
+
+(defun priority-queue-peek (q)
+  (let ((heap (priority-queue-heap q)))
+    (and (plusp (fill-pointer heap)) (aref heap 0))))
+
+(defun priority-queue-pop (q)
+  (let* ((heap (priority-queue-heap q))
+         (key (priority-queue-key q))
+         (n (1- (fill-pointer heap))))
+    (when (minusp n)
+      (error "Trying to pop from an empty priority queue!"))
+    (let ((top (aref heap 0))
+          (item (aref heap n)))
+      (setf (fill-pointer heap) n)
+      (when (plusp n)
+        (let ((k (funcall key item))
+              (i 0))
+          (loop
+            (let* ((left (1+ (* 2 i)))
+                   (right (1+ left))
+                   (child
+                     (cond
+                       ((>= left n) (return))
+                       ((and (< right n)
+                             (< (funcall key (aref heap right))
+                                (funcall key (aref heap left))))
+                        right)
+                       (t left))))
+              (if (< (funcall key (aref heap child)) k)
+                  (setf (aref heap i) (aref heap child)
+                        i child)
+                  (return))))
+          (setf (aref heap i) item)))
+      top)))
 
 );with-upgradability

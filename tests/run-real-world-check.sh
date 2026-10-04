@@ -14,6 +14,8 @@ for system in "$@"; do
   echo "==> $system"
   for mode in $MODES; do
     cache_root="$REPO_ROOT/.cache/real-world/$system/$mode"
+    # Build everything from scratch, so both modes do the same work.
+    rm -rf "$cache_root"
     mkdir -p "$cache_root"
     echo "-- $mode"
     if ! XDG_CACHE_HOME="$cache_root" \

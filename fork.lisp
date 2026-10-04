@@ -7,8 +7,7 @@
    #:ncpus #:*max-forks* #:*max-actual-forks*
    #:can-fork-p #:can-fork-or-warn
    #:posix-fork #:posix-setpgrp #:posix-waitpid #:posix-wexitstatus #:+echild+
-   ;; posix-close posix-pipe fd-output-stream fd-input-stream
-   ))
+   #:posix-kill #:posix-pipe #:wait-for-input))
 
 (in-package :poiu/fork)
 
@@ -56,13 +55,7 @@
          (ignore-errors (parse-integer value :junk-allowed t)))))
 
 (defun default-max-forks ()
-  (or (getenv-integer "POIU_MAX_FORKS")
-      #+sbcl
-      (and (featurep :darwin)
-           ;; Raw forked compilation on modern SBCL/macOS becomes unstable at
-           ;; higher fan-out; keep a small amount of parallelism by default.
-           (max 1 (min 2 (or (ncpus) 2))))
-      (or (ncpus) 16)))
+  (max 1 (or (getenv-integer "POIU_MAX_FORKS") (ncpus) 16)))
 
 (defparameter *max-forks* (default-max-forks)) ; limit how parallel we will try to be.
 (defparameter *max-actual-forks* 0) ; record how parallel we actually went.
@@ -73,11 +66,14 @@
   ;; of what is allowed between GCs, then trigger the GC.
   ;; Note: can possibly modify parameters and reset in sb-ext:*after-gc-hooks*
   (defparameter *prefork-allocation-reserve-ratio* .80) ; default ratio: 80%
+  ;; A GC in a child soon after fork would copy-on-write most of the heap, so it is
+  ;; cheaper to collect once in the parent than in every child.
   (defun should-i-gc-p ()
-    (let ((available-bytes (- (sb-alien:extern-alien "auto_gc_trigger" sb-alien:long)
-                              (sb-kernel:dynamic-usage)))
-          (allocation-threshhold (sb-ext:bytes-consed-between-gcs)))
-      (< available-bytes (* *prefork-allocation-reserve-ratio* allocation-threshhold)))))
+    (ignore-errors
+     (let ((available-bytes (- (sb-alien:extern-alien "auto_gc_trigger" sb-alien:long)
+                               (sb-kernel:dynamic-usage)))
+           (allocation-threshhold (sb-ext:bytes-consed-between-gcs)))
+       (< available-bytes (* *prefork-allocation-reserve-ratio* allocation-threshhold))))))
 
 #+(and clisp os-unix)
 (defun no-child-process-condition-p (c)
@@ -199,8 +195,17 @@ and the status of said process, to pass to posix-wexitstatus."
   (progn pid nohang untraced continued
          (not-implemented-error 'posix-setpgrp)))
 
+(defun posix-kill (pid signal)
+  "Send SIGNAL (an integer) to process PID, ignoring errors (e.g. if it already exited)."
+  #+(and allegro os-unix) (ignore-errors (excl.osi:kill pid signal))
+  #+(and clisp os-unix) (ignore-errors (funcall (find-symbol* 'kill "POSIX") pid signal))
+  #+(and clozure os-unix) (ignore-errors (ccl::external-call "kill" :int pid :int signal :int))
+  #+(and sbcl os-unix) (ignore-errors (sb-posix:kill pid signal))
+  #-(and os-unix (or allegro clisp clozure sbcl)) (progn pid signal nil))
+
 (defun posix-wexitstatus (x)
-  "Convert the status return by POSIX-WAITPID to an exit code between 0 and 255"
+  "Convert the status return by POSIX-WAITPID to an exit code between 0 and 255,
+or a non-integer description if the process did not exit normally."
   #+(and allegro os-unix)
   (first x)
   #+(and clisp os-unix)
@@ -210,7 +215,9 @@ and the status of said process, to pass to posix-wexitstatus."
   #+(and clozure os-unix)
   (ccl::wexitstatus x)
   #+(and sbcl os-unix)
-  (sb-posix:wexitstatus x)
+  (if (sb-posix:wifexited x)
+      (sb-posix:wexitstatus x)
+      (list :signaled (ignore-errors (sb-posix:wtermsig x))))
   #-(and os-unix (or allegro clisp clozure sbcl))
   (not-implemented-error 'posix-wexitstatus))
 
@@ -234,3 +241,52 @@ and the status of said process, to pass to posix-wexitstatus."
             (sb-sys:make-fd-stream write-fd :output t)))
   #-(and os-unix (or allegro clisp clozure sbcl))
   (not-implemented-error 'posix-pipe))
+
+#+(and sbcl os-unix)
+(sb-alien:define-alien-type nil
+    (sb-alien:struct pollfd
+                     (fd sb-alien:int)
+                     (events sb-alien:short)
+                     (revents sb-alien:short)))
+
+(defun stream-fd (stream)
+  #+(and sbcl os-unix) (sb-sys:fd-stream-fd stream)
+  #-(and sbcl os-unix) (progn stream nil))
+
+(defun wait-for-input (streams timeout)
+  "Wait up to TIMEOUT seconds until some of the input STREAMS (made by POSIX-PIPE)
+have input available or are at end of file. Return the list of those streams,
+which is empty if the timeout expired (or a signal interrupted the wait)."
+  #+(and sbcl os-unix)
+  (let ((n (length streams)))
+    (when (plusp n)
+      (let ((fds (sb-alien:make-alien (sb-alien:struct pollfd) n)))
+        (unwind-protect
+             (progn
+               (loop :for stream :in streams :for i :from 0
+                     :for pollfd = (sb-alien:deref fds i)
+                     :do (setf (sb-alien:slot pollfd 'fd) (stream-fd stream)
+                               (sb-alien:slot pollfd 'events) 1 ; POLLIN
+                               (sb-alien:slot pollfd 'revents) 0))
+               (let ((ready (sb-alien:alien-funcall
+                             (sb-alien:extern-alien "poll"
+                                                    (function sb-alien:int
+                                                              (* (sb-alien:struct pollfd))
+                                                              sb-alien:unsigned-long
+                                                              sb-alien:int))
+                             fds n (max 0 (round (* timeout 1000))))))
+                 (when (plusp ready)
+                   (loop :for stream :in streams :for i :from 0
+                         ;; POLLIN, POLLHUP, POLLERR or POLLNVAL: reading won't block.
+                         :unless (zerop (sb-alien:slot (sb-alien:deref fds i) 'revents))
+                           :collect stream))))
+          (sb-alien:free-alien fds)))))
+  #-(and sbcl os-unix)
+  ;; Portable fallback: poll with LISTEN, sleeping a little in between.
+  (loop :with deadline = (+ (get-internal-real-time)
+                            (* timeout internal-time-units-per-second))
+        ;; NB: this can't see end of file; the caller must also check whether the writer died.
+        :for ready = (remove-if-not #'listen streams)
+        :until (or ready (>= (get-internal-real-time) deadline))
+        :do (sleep 0.002)
+        :finally (return ready)))

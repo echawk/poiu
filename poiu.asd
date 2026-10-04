@@ -4,12 +4,12 @@
   :licence "MIT"
   :description "Parallel Operator on Independent Units"
   :long-description "POIU is a extension to ASDF that may operate on your systems in parallel.
-POIU will notably compile each Lisp file in its own forked process,
+POIU will notably compile Lisp files in a pool of forked worker processes,
 in parallel with other operations (compilation or loading).
 However, it will load FASLs serially as they become available."
   :depends-on ((:version "asdf" "3.3.0")
                (:feature (:and :sbcl :os-unix) (:require :sb-posix)))
-  :version "1.34.1"
+  :version "1.35.0"
   :components
   ((:file "queue")
    (:file "fork")

@@ -108,12 +108,27 @@
              (progn
                (asdf:load-system name :force t :verbose nil)
                (format t "PASS ~A~%" name)
+               (let ((stats (and (find-package "POIU") (find-symbol "*LAST-BUILD-STATISTICS*" "POIU"))))
+                 (when (and stats (symbol-value stats))
+                   (let ((*print-pretty* nil))
+                     (format t "poiu-stats=~S~%" (symbol-value stats)))))
                (finish-output))
            (error (condition)
              (format t "FAIL ~A~%" name)
              (finish-output)
              (error condition)))
       (report-elapsed-time start root-process-id))))
+
+(defun run-system-tests (name)
+  "Run the test suite of system NAME, also built with the current plan class.
+Most test-op methods signal an error when tests fail; report that."
+  (handler-case
+      (progn
+        (asdf:test-system name)
+        (format t "~&TESTS-PASS ~A~%" name))
+    (error (condition)
+      (format t "~&TESTS-FAIL ~A: ~A~%" name condition)))
+  (finish-output))
 
 (defun main ()
   (ensure-local-cache)
@@ -123,6 +138,8 @@
   (let* ((mode (requested-plan-mode))
          (name (canonical-system-name (requested-system-name))))
     (maybe-load-poiu mode)
-    (load-system-with-timing name mode)))
+    (load-system-with-timing name mode)
+    (when (equal (uiop:getenv "POIU_RUN_TESTS") "1")
+      (run-system-tests name))))
 
 (main)
